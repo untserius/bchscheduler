@@ -222,11 +222,6 @@ public class utils {
 		}
 	   return parse;
 	}
-
-	public String getuuidRandomId() {
-		return String.valueOf(UUID.randomUUID());
-	}
-
 	public static String getIntRandomNumber() {
 		Random rand1 = new Random();
 		String randomValues = String.valueOf(Math.abs(rand1.nextInt()));

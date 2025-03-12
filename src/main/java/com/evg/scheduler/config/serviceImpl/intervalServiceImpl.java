@@ -355,7 +355,7 @@ public class intervalServiceImpl implements intervalService {
 
 	public void updateSessionsData(String sessionIds) {
 		try {
-			String deleteActiveTrans = "Update Session set reasonForTer = 'EVDisconnected',transactionStatus='completed', modifiedDate=GETUTCDATE() where SessionId  in ("
+			String deleteActiveTrans = "Update Session set reasonForTer = 'EVDisconnected',transactionStatus='completed' where SessionId  in ("
 					+ sessionIds + ") and reasonForTer = 'InSession'";
 			logger.info("deleting ActiveTrans from Session query : " + deleteActiveTrans);
 			generalDao.updateSqlQuiries(deleteActiveTrans);
@@ -987,8 +987,8 @@ public class intervalServiceImpl implements intervalService {
 								|| reason.equalsIgnoreCase("Insession")) {
 							reason = "EVDisconnected";
 						}
-						String str = "update session set settlement='settled',reasonForTer='" + reason
-								+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+						String str = "update session set settlement='settled', settlementTimeStamp=GETUTCDATE(),reasonForTer='" + reason
+								+ "' where sessionId = '" + sessionId + "'";
 						generalDao.updateSqlQuiries(str);
 						deleteTnxData(sessionId);
 
@@ -1075,6 +1075,25 @@ public class intervalServiceImpl implements intervalService {
 			e.printStackTrace();
 		}
 	}
+
+	@Override
+	public void cleanupOldSessionBillableData() {
+		logger.info("Starting scheduled cleanup of old ocpp_sessionBillableData records (25-hour threshold)");
+
+		try {
+			// Delete records not updated in last 25 hours
+			String cleanupQuery =
+					"DELETE FROM ocpp_sessionBillableData " +
+							"WHERE updated_date < DATEADD(HOUR, -25, GETUTCDATE())";
+
+			int deletedCount = executeRepository.update(cleanupQuery);
+
+			logger.info("Successfully cleaned up {} old records from ocpp_sessionBillableData (25-hour threshold)", deletedCount);
+		} catch (Exception e) {
+			logger.error("Error during cleanup of ocpp_sessionBillableData: {}", e.getMessage(), e);
+		}
+	}
+
 	@Override
 	public void registeredUsersOfflineAmountCapture() {
 		try {
@@ -1139,8 +1158,8 @@ public class intervalServiceImpl implements intervalService {
 					e.printStackTrace();
 				}
 				try {
-					String str = "update session set settlement='settled',reasonForTer='" + reason
-							+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+					String str = "update session set settlement='settled', settlementTimeStamp=GETUTCDATE(), reasonForTer='" + reason
+							+ "' where sessionId = '" + sessionId + "'";
 					generalDao.updateSqlQuiries(str);
 				} catch (Exception e) {
 					e.printStackTrace();
@@ -1252,10 +1271,13 @@ public class intervalServiceImpl implements intervalService {
 								}
 							}
 
+							String chargingPeriod = getChargingPeriodforCdr(sessionId);
+							String chargingPeriodToStore = chargingPeriod == null ? null : chargingPeriod.equalsIgnoreCase("null") ? null : "'" + chargingPeriod + "'";
+
 							String insertCDR = "insert into ocpi_cdr (id,country_code,party_id,start_date_time,end_date_time,session_id,tariffs,cdr_token,auth_method,authorization_reference,"
 									+ " cdr_location,meter_id,currency,total_cost,total_fixed_cost,total_energy,total_energy_cost,"
 									+ " total_time,total_time_cost,remark,invoice_reference_id,"
-									+ " credit,credit_reference_id,home_charging_compensation,taxes,last_updated,total_parking_time) values ("
+									+ " credit,credit_reference_id,home_charging_compensation,taxes,last_updated,total_parking_time,charging_period) values ("
 									+ " '" + sessionId + "','" + String.valueOf(OcpiToken.get(0).get("country_code"))
 									+ "','" + String.valueOf(OcpiToken.get(0).get("party_id")) + "','" + startTime
 									+ "'," + " '" + endTime + "','" + sessionId + "','"
@@ -1269,10 +1291,11 @@ public class intervalServiceImpl implements intervalService {
 									+ " 'Session ended because the cable was disconnected by user.','"
 									+ String.valueOf(UUID.randomUUID()) + "'," + " '0','','0','"
 									+ objectMapper.writeValueAsString(taxes) + "','" + utils.getUTCDateString() + "',"
-									+ 0 + ")";
+									+ 0 + ","+chargingPeriodToStore+")";
 							executeRepository.update(insertCDR);
 							executeRepository.update("update ocpi_cdr set total_parking_cost='" + idlejson
 									+ "' where session_id = '" + sessionId + "'");
+							deleteChargingPeriod(sessionId);
 							postStopSession(String.valueOf(sessionId),
 									String.valueOf(OcpiToken.get(0).get("country_code")),
 									String.valueOf(OcpiToken.get(0).get("party_id")));
@@ -1428,6 +1451,45 @@ public class intervalServiceImpl implements intervalService {
 		return tariffs;
 	}
 
+	public void deleteChargingPeriod(String sessionId) {
+		try {
+			executeRepository.execute("DELETE FROM ocpi_cdr_dimension "
+					+ "WHERE chargingPeriod_id IN (SELECT id FROM ocpi_charging_period WHERE session_id  in ('"+ sessionId + "'))");
+			executeRepository.execute("delete ocpi_charging_period where session_id in ('" + sessionId + "')");
+		}
+		catch (Exception e) {
+		}
+	}
+
+	public String getChargingPeriodforCdr(String id) {
+
+		String query = "DECLARE @json nvarchar(max); WITH src (n) AS (SELECT FORMAT(ocp.start_date_time, 'yyyy-MM-ddTHH:mm:ssZ') AS 'start_date_time', ocp.tariff_id AS 'tariff_id', "
+				+ "(SELECT  ocd.type as 'type',ocd.volume  as 'volume' FROM ocpi_cdr_dimension ocd  "
+				+ "WHERE ocd.chargingPeriod_id = ocp.id FOR JSON PATH ) AS 'dimensions' "
+				+ "FROM ocpi_charging_period ocp WHERE ocp.session_id = '" + id + "' "
+				+ "order by ocp.start_date_time desc  for json path) SELECT @json = src.n FROM src SELECT @json as 'chargingPeriod' ";
+
+		List<Map<String, Object>> list = executeRepository.findAll(query);
+
+		String chargingPeriod = null;
+
+		try {
+
+			if (list.size() > 0 && list.get(0).get("chargingPeriod") != null) {
+
+				chargingPeriod = String.valueOf(list.get(0).get("chargingPeriod"));
+
+			}
+
+		} catch (Exception e) {
+
+		}
+
+		return chargingPeriod;
+
+	}
+
+
 	public void deleteTnxData(String sessionId) {
 		try {
 			String query = "delete from ocpp_TransactionData where sessionid='" + sessionId + "'";
@@ -1560,14 +1622,14 @@ public class intervalServiceImpl implements intervalService {
 			revenue = utils.decimalwithtwodecimals(revenue);
 			logger.info("896 >> revenue : " + revenue);
 			if (paymentType.equalsIgnoreCase("Card") || paymentType.contains("Card") || paymentType.contains("card")) {
-				String str = "update session set settlement='settled',reasonForTer='" + reason + "', modifiedDate=GETUTCDATE() where sessionId = '"
+				String str = "update session set settlement='settled', settlementTimeStamp=GETUTCDATE(), reasonForTer='" + reason + "' where sessionId = '"
 						+ sessionId + "'";
 				generalDao.updateSqlQuiries(str);
 
-				String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,modifiedDate,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
-						+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate,uid) values(0,0,'Vehicle charging','"
-						+ utils.getUTCDateString() + "', '"+utils.getUTCDateString()+"' ,'CAD',0,'Credit Card','SUCCESS'," + "0,0,0,0,0,0,'session',"
-						+ account_id + ",'" + utils.getUTCDateString() + "','" + sessionId + "',0,'"+utils.getuuidRandomId()+"')";
+				String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
+						+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate) values(0,0,'Vehicle charging','"
+						+ utils.getUTCDateString() + "','CAD',0,'Credit Card','SUCCESS'," + "0,0,0,0,0,0,'session',"
+						+ account_id + ",'" + utils.getUTCDateString() + "','" + sessionId + "',0)";
 
 				generalDao.updateSqlQuiries(str3);
 
@@ -1575,18 +1637,18 @@ public class intervalServiceImpl implements intervalService {
 			} else {
 				if (accountBalance < revenue) {
 					double bal = accountBalance - revenue;
-					String str = "update session set settlement='settled',reasonForTer='" + reason
-							+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+					String str = "update session set settlement='settled',settlementTimeStamp=GETUTCDATE() ,reasonForTer='" + reason
+							+ "' where sessionId = '" + sessionId + "'";
 					generalDao.updateSqlQuiries(str);
 
-					String str1 = "update Accounts set accountBalance=" + bal +", modifiedDate= GETUTCDATE() where id=" + account_id;
+					String str1 = "update Accounts set accountBalance=" + bal + " where id=" + account_id;
 					generalDao.updateSqlQuiries(str1);
 
-					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,modifiedDate,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
-							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate,uid) values(0,'"
-							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','"+utils.getUTCDateString()+"','CAD','" + bal
+					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
+							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate) values(0,'"
+							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','CAD','" + bal
 							+ "','Wallet','SUCCESS'," + "0,0,0,0,0,0,'session'," + account_id + ",'"
-							+ utils.getUTCDateString() + "','" + sessionId + "',0,'"+utils.getuuidRandomId()+"')";
+							+ utils.getUTCDateString() + "','" + sessionId + "',0)";
 					generalDao.updateSqlQuiries(str3);
 
 					if (bal <= -0.50) {
@@ -1608,35 +1670,35 @@ public class intervalServiceImpl implements intervalService {
 				} else if (accountBalance > revenue) {
 					double bal = accountBalance - revenue;
 
-					String str = "update session set settlement='settled',reasonForTer='" + reason
-							+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+					String str = "update session set settlement='settled', settlementTimeStamp=GETUTCDATE(),reasonForTer='" + reason
+							+ "' where sessionId = '" + sessionId + "'";
 					generalDao.updateSqlQuiries(str);
 
-					String str1 = "update Accounts set accountBalance=" + bal +", modifiedDate= GETUTCDATE() where id=" + account_id;
+					String str1 = "update Accounts set accountBalance=" + bal + " where id=" + account_id;
 					generalDao.updateSqlQuiries(str1);
 
-					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,modifiedDate,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
-							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate,uid) values(0,'"
-							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','"+utils.getUTCDateString()+"','CAD','" + bal
+					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
+							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate) values(0,'"
+							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','CAD','" + bal
 							+ "','Wallet','SUCCESS'," + "0,0,0,0,0,0,'session'," + account_id + ",'"
-							+ utils.getUTCDateString() + "','" + sessionId + "',0,'"+utils.getuuidRandomId()+"')";
+							+ utils.getUTCDateString() + "','" + sessionId + "',0)";
 					generalDao.updateSqlQuiries(str3);
 
 					logger.info("911 >> sessionId : " + sessionId + " , accountId : " + account_id
 							+ " , no negative Balance API calling");
 				} else {
-					String str = "update session set settlement='settled',reasonForTer='" + reason
-							+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+					String str = "update session set settlement='settled',settlementTimeStamp=GETUTCDATE(),reasonForTer='" + reason
+							+ "' where sessionId = '" + sessionId + "'";
 					generalDao.updateSqlQuiries(str);
 
-					String str1 = "update Accounts set accountBalance=" + 0 +", modifiedDate= GETUTCDATE() where id=" + account_id;
+					String str1 = "update Accounts set accountBalance=" + 0 + " where id=" + account_id;
 					generalDao.updateSqlQuiries(str1);
 
-					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,modifiedDate,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
-							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate,uid) values(0,'"
-							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','"+utils.getUTCDateString()+"','CAD','" + 0
+					String str3 = "insert into account_transaction(amtCredit,amtDebit,comment,createTimeStamp,currencyType,currentBalance,paymentMode,status,tax1_amount,tax1_pct,tax2_amount,tax2_pct,"
+							+ "tax3_amount,tax3_pct,transactionType,account_id,lastUpdatedTime,sessionId,currencyRate) values(0,'"
+							+ revenue + "','Vehicle charging','" + utils.getUTCDateString() + "','CAD','" + 0
 							+ "','Wallet','SUCCESS'," + "0,0,0,0,0,0,'session'," + account_id + ",'"
-							+ utils.getUTCDateString() + "','" + sessionId + "',0,'"+utils.getuuidRandomId()+"')";
+							+ utils.getUTCDateString() + "','" + sessionId + "',0)";
 					generalDao.updateSqlQuiries(str3);
 
 					logger.info("922 >> sessionId : " + sessionId + " , accountId : " + account_id
@@ -1649,7 +1711,7 @@ public class intervalServiceImpl implements intervalService {
 			if (acc != null && acc.size() > 0) {
 				String Account_transactionId = String.valueOf(acc.get(0).get("id"));
 				String str = "update session set accountTransaction_id='" + Account_transactionId
-						+ "', modifiedDate=GETUTCDATE() where sessionId = '" + sessionId + "'";
+						+ "' where sessionId = '" + sessionId + "'";
 				executeRepository.update(str);
 
 				insertNotificationTracker(userId, Account_transactionId, sessionId);
@@ -1736,6 +1798,9 @@ public class intervalServiceImpl implements intervalService {
 				headers.set("EVG-Correlation-ID", mobileAuthKey);
 				HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(params, headers);
 				logger.info("payment Type stripe capture request body : " + params);
+
+				String updateSettlementTimestamp = "update session set settlementTimestamp=GETUTCDATE() where sessionId = '" + sessionId + "'";
+				generalDao.updateSqlQuiries(updateSettlementTimestamp);
 				apicallingPOST(urlToRead, requestEntity);
 			}
 		} catch (Exception e) {

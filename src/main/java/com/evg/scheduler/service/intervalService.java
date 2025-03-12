@@ -62,6 +62,8 @@ public interface intervalService {
 
 	void stationUpAndDownData();
 
+	void cleanupOldSessionBillableData();
+
 	//void configurationKeys();
 
 	//void triggerMessage();

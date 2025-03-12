@@ -193,6 +193,13 @@ public class scheduledTasks {
 		}catch (Exception e) {
 			e.printStackTrace();
 		}
+
+		try {
+			intervalService.cleanupOldSessionBillableData();
+			logger.info("cleanupOldSessionBillableData ended at : " + utils.getUTCDate());
+		} catch (Exception e) {
+			e.printStackTrace();;
+		}
 		
 		try {
 			intervalService.stationUpAndDownData();

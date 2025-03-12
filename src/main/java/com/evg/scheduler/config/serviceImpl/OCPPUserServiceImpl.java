@@ -249,11 +249,11 @@ public class OCPPUserServiceImpl implements ocppUserService{
 				String utctime = utils.getUTCDateString();
 				String query = "";
 				if (list == null || list.size() <= 0) {
-					query = "insert into account_transaction (amtCredit,amtDebit,comment,createTimeStamp,modifiedDate,currentBalance,customerId,"
-							+ " customerIdAtStationType,status,account_id,sessionId,currencyType,currencyRate,lastUpdatedTime,paymentMode,transactionType,uid) values ('"+refundAmount+"','"
-							+ amtDebit + "','" + comment + "'," + " '" + utctime + "','"+utctime+"','"+ remainingBalance + "','"
+					query = "insert into account_transaction (amtCredit,amtDebit,comment,createTimeStamp,currentBalance,customerId,"
+							+ " customerIdAtStationType,status,account_id,sessionId,currencyType,currencyRate,lastUpdatedTime,paymentMode,transactionType) values ('"+refundAmount+"','"
+							+ amtDebit + "','" + comment + "'," + " '" + utctime + "','" + remainingBalance + "','"
 							+ customerId + "','" + 1l + "','" + status + "','" + account.get("accid") + "','" + sessionId
-							+ "','" + usercurrencyType + "','" +currencyRate+ "','"+ utctime +"' ,'"+paymentMode+"','"+transactionType+"','"+utils.getuuidRandomId()+"')";
+							+ "','" + usercurrencyType + "','" +currencyRate+ "','"+ utctime +"' ,'"+paymentMode+"','"+transactionType+"')";
 					generalDao.updateSqlQuiries(query);//queryExecute
 					logger.info(stationRefNum + " , inserted into acc txn table : " + query);
 
@@ -266,13 +266,12 @@ public class OCPPUserServiceImpl implements ocppUserService{
 							+ "'," + " currentBalance='" + remainingBalance
 							+ "',customerId='" + customerId + "',customerIdAtStationType='" + 1l + "',status='" + status
 							+ "'," + " account_id='" + account.get("accid") + "',sessionId='" + sessionId
-							+ "',currencyType='" + usercurrencyType + "',currencyRate='" + currencyRate
-							+ "',lastUpdatedTime='"+ utctime +"' ,paymentMode='"+paymentMode+"',transactionType='"+transactionType
-							+ "',modifiedDate=GETUTCDATE() where id = '" + id + "'";
+							+ "',currencyType='" + usercurrencyType + "',currencyRate='" + currencyRate + "',lastUpdatedTime='"+ utctime +"' ,paymentMode='"+paymentMode+"',transactionType='"+transactionType+"' where id = '"
+							+ id + "'";
 					generalDao.updateSqlQuiries(query);
 				}
 				String queryForAccountBalanceUpdate = "update Accounts set accountBalance=" + remainingBalance
-						+ ", modifiedDate= GETUTCDATE() where id=" + account.get("accid");
+						+ " where id=" + account.get("accid");
 				logger.info(stationRefNum + " , update accnts table : " + queryForAccountBalanceUpdate);
 				generalDao.updateSqlQuiries(queryForAccountBalanceUpdate);
 			} catch (Exception e) {
